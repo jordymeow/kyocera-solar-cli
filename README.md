@@ -16,7 +16,7 @@ A beautiful command-line interface for monitoring your Kyocera solar power syste
 ## Screenshot
 
 ```
-🌇 Kyocera Solar by Meow
+🌇 Kyocera Solar
 Saturday, November 15 · 11:14 AM
 ☀️  中野区 · 16°C
 

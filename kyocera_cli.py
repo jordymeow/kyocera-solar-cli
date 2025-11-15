@@ -467,7 +467,7 @@ def render_status(data: Dict[str, Any], config: KyoceraConfig) -> str:
     lines = []
 
     # Header - Brand
-    lines.append(f"\n{BOLD}{CYAN}🌇 Kyocera Solar by Meow{RESET}")
+    lines.append(f"\n{BOLD}{CYAN}🌇 Kyocera Solar{RESET}")
 
     # Date and time
     lines.append(f"{GRAY}{date_str} · {time_str}{RESET}")
