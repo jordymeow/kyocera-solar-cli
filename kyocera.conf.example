@@ -1,0 +1,17 @@
+[auth]
+email = your-email@example.com
+password = your-password
+
+[site]
+organization_id = 1
+site_id = 123456
+# Location name to display as fallback if API doesn't provide it (default: Japan)
+# Normally the API returns the actual zone name (e.g., 中野区)
+location = Japan
+
+[battery]
+# Model: Enerezza Plus EGS-MC1650
+# Battery capacity in kWh - total nominal capacity (default: 7.0)
+capacity_kwh = 16.5
+# Minimum reserve percentage - battery won't discharge below this (default: 30)
+reserve_percent = 30
