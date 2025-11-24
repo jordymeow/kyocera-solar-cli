@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import csv
 import logging
 import json
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from html.parser import HTMLParser
 from http.cookiejar import Cookie, CookieJar
 from pathlib import Path
@@ -94,6 +96,7 @@ class KyoceraConfig:
     location: str = "Japan"
     battery_capacity_kwh: float = 7.0
     battery_reserve_percent: int = 30
+    log_dir: Optional[Path] = None
 
     @classmethod
     def load(cls, path: Path) -> "KyoceraConfig":
@@ -130,6 +133,13 @@ class KyoceraConfig:
             except ValueError:
                 pass
 
+        # Logging settings (optional)
+        log_dir = None
+        if "logging" in cp:
+            log_dir_str = cp["logging"].get("log_dir", "").strip()
+            if log_dir_str:
+                log_dir = Path(log_dir_str)
+
         return cls(
             email=email,
             password=password,
@@ -139,7 +149,223 @@ class KyoceraConfig:
             location=location,
             battery_capacity_kwh=battery_capacity_kwh,
             battery_reserve_percent=battery_reserve_percent,
+            log_dir=log_dir,
         )
+
+
+class CSVLogger:
+    """Handles CSV logging of solar system data at 10-minute intervals."""
+
+    def __init__(self, site_id: str, log_dir: Optional[Path] = None) -> None:
+        """
+        Initialize CSV logger.
+
+        Args:
+            site_id: The site ID to use in the filename
+            log_dir: Directory to store logs (defaults to current directory)
+        """
+        self.site_id = site_id
+        self.log_dir = log_dir or Path(".")
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.log_file = self.log_dir / f"{site_id}.log"
+        self.last_logged_time: Optional[str] = None
+
+        # CSV field names
+        self.fieldnames = [
+            "date",
+            "time",
+            "weather",
+            "temperature",
+            "solar",
+            "grid",
+            "battery_charge",
+            "battery_percent",
+            "home"
+        ]
+
+        # Initialize CSV file with headers if it doesn't exist, or read last timestamp
+        if not self.log_file.exists():
+            self._write_header()
+        else:
+            self._read_last_timestamp()
+
+    def _write_header(self) -> None:
+        """Write CSV header to the log file."""
+        with self.log_file.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self.fieldnames)
+            writer.writeheader()
+
+    def _read_last_timestamp(self) -> None:
+        """Read the last logged timestamp from existing CSV file to prevent duplicates across restarts."""
+        try:
+            with self.log_file.open("r", encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f)
+                last_row = None
+                for row in reader:
+                    last_row = row
+                if last_row and "date" in last_row and "time" in last_row:
+                    self.last_logged_time = f"{last_row['date']} {last_row['time']}"
+                    logging.debug("Resumed from last timestamp: %s", self.last_logged_time)
+        except Exception as exc:
+            logging.debug("Could not read last timestamp from CSV: %s", exc)
+
+    def _should_log(self, now: datetime) -> bool:
+        """
+        Check if we should log based on time rounding.
+        Only log when minutes are at 10-minute intervals (0, 10, 20, 30, 40, 50).
+
+        Args:
+            now: Current datetime
+
+        Returns:
+            True if we should log, False otherwise
+        """
+        # Check if minute is at a 10-minute interval
+        if now.minute % 10 != 0:
+            return False
+
+        # Create timestamp string (date + time without seconds)
+        timestamp = now.strftime("%Y-%m-%d %H:%M")
+
+        # Avoid duplicate entries for the same rounded time
+        if timestamp == self.last_logged_time:
+            return False
+
+        return True
+
+    def _extract_data(self, data: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Extract relevant fields from the API response.
+
+        Args:
+            data: The realtime data from the API
+
+        Returns:
+            Dictionary with cleaned CSV-ready values
+        """
+        # Parse time
+        clock = data.get("clock", {})
+        now_str = clock.get("now", "")
+        try:
+            dt = datetime.fromisoformat(now_str.replace("+09:00", "+09:00"))
+            date_val = dt.strftime("%Y-%m-%d")
+            time_val = dt.strftime("%H:%M")
+        except Exception:
+            dt = datetime.now()
+            date_val = dt.strftime("%Y-%m-%d")
+            time_val = dt.strftime("%H:%M")
+
+        # Weather
+        weather_data = data.get("weather", {})
+        weather_icon = weather_data.get("weather_icon", "").lower()
+        # Simplify weather to one word
+        weather_map = {
+            "sunny": "sunny",
+            "clear": "clear",
+            "cloudy": "cloudy",
+            "partly_cloudy": "partly_cloudy",
+            "rainy": "rainy",
+            "rain": "rainy",
+            "snow": "snowy",
+            "storm": "stormy",
+            "thunderstorm": "stormy",
+            "fog": "foggy",
+            "mist": "foggy"
+        }
+        weather = weather_map.get(weather_icon, weather_icon or "unknown")
+
+        # Temperature
+        met = data.get("meteorol", {})
+        temp = met.get("temp")
+        temperature = f"{temp:.1f}" if temp is not None else ""
+
+        # Solar
+        pv = data.get("pv", {})
+        solar = f"{pv.get('value', 0) or 0:.2f}"
+
+        # Grid (negative for purchase, positive for sold)
+        purchased = data.get("purchased", {})
+        sold = data.get("sold", {})
+        purchased_val = purchased.get("value", 0) or 0
+        sold_val = sold.get("value", 0) or 0
+
+        if purchased_val > 0:
+            grid = f"-{purchased_val:.2f}"
+        elif sold_val > 0:
+            grid = f"{sold_val:.2f}"
+        else:
+            grid = "0.00"
+
+        # Battery charge rate (negative for discharge, positive for charge)
+        battery = data.get("battery", {})
+        charge_val = battery.get("charge", {}).get("value", 0) or 0
+        discharge_val = battery.get("discharge", {}).get("value", 0) or 0
+
+        if charge_val > 0:
+            battery_charge = f"{charge_val:.2f}"
+        elif discharge_val > 0:
+            battery_charge = f"-{discharge_val:.2f}"
+        else:
+            battery_charge = "0.00"
+
+        # Battery percentage
+        battery_percent = ""
+        if battery:
+            remaining = battery.get("remaining_rate", {}).get("value")
+            if remaining is not None:
+                battery_percent = f"{remaining:.0f}"
+
+        # Home consumption
+        consumed = data.get("consumed", {})
+        home = f"{consumed.get('value', 0) or 0:.2f}"
+
+        return {
+            "date": date_val,
+            "time": time_val,
+            "weather": weather,
+            "temperature": temperature,
+            "solar": solar,
+            "grid": grid,
+            "battery_charge": battery_charge,
+            "battery_percent": battery_percent,
+            "home": home
+        }
+
+    def log(self, data: Dict[str, Any]) -> bool:
+        """
+        Log the current data if conditions are met.
+
+        Args:
+            data: The realtime data from the API
+
+        Returns:
+            True if data was logged, False if skipped
+        """
+        # Parse current time
+        clock = data.get("clock", {})
+        now_str = clock.get("now", "")
+        try:
+            now = datetime.fromisoformat(now_str.replace("+09:00", "+09:00"))
+        except Exception:
+            now = datetime.now()
+
+        # Check if we should log
+        if not self._should_log(now):
+            return False
+
+        # Extract data
+        row = self._extract_data(data)
+
+        # Write to CSV
+        with self.log_file.open("a", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self.fieldnames)
+            writer.writerow(row)
+
+        # Update last logged time
+        self.last_logged_time = f"{row['date']} {row['time']}"
+        logging.debug("Logged data to %s for %s", self.log_file, self.last_logged_time)
+
+        return True
 
 
 class KyoceraClient:
@@ -169,6 +395,10 @@ class KyoceraClient:
     def _load_session_cache(self) -> None:
         if not self.cache_path.exists():
             return
+
+        # Clean up old session files (older than 30 days)
+        self._cleanup_old_cache()
+
         try:
             with self.cache_path.open("r", encoding="utf-8") as file_handle:
                 payload = json.load(file_handle)
@@ -185,6 +415,19 @@ class KyoceraClient:
                 logging.debug("Loaded %d cookies from cache.", len(cookies))
         except Exception as exc:  # noqa: BLE001
             logging.debug("Failed to load cached session: %s", exc)
+
+    def _cleanup_old_cache(self) -> None:
+        """Remove session cache files older than 30 days."""
+        try:
+            cache_age = time.time() - self.cache_path.stat().st_mtime
+            max_age = 60 * 60 * 24 * 30  # 30 days in seconds
+            if cache_age > max_age:
+                self.cache_path.unlink()
+                logging.debug("Removed stale session cache (%.0f days old).", cache_age / (60 * 60 * 24))
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            logging.debug("Failed to cleanup old cache: %s", exc)
 
     def _persist_session(self) -> None:
         if self.disable_cache:
@@ -696,7 +939,13 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         default=30,
         help="Refresh interval in seconds for watch mode (default: 30)",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    # Validate interval to prevent API hammering
+    if args.interval < 5:
+        parser.error("--interval must be at least 5 seconds to avoid overwhelming the API")
+
+    return args
 
 
 def configure_logging(verbosity: int) -> None:
@@ -721,6 +970,9 @@ def main(argv: List[str] | None = None) -> int:
     config = KyoceraConfig.load(args.config)
     client = KyoceraClient(config, disable_cache=args.force_login)
 
+    # Initialize CSV logger
+    logger = CSVLogger(config.site_id, config.log_dir)
+
     if args.watch:
         # Watch mode: continuously refresh
         if args.json:
@@ -733,6 +985,10 @@ def main(argv: List[str] | None = None) -> int:
                 clear_screen()
                 try:
                     data = client.get_status()
+
+                    # Log data to CSV if at 10-minute interval
+                    logger.log(data)
+
                     print(render_status(data, config), flush=True)
                     print(f"\033[90mMade by Jordy Meow (https://jordymeow.com)\033[0m", flush=True)
                     print(f"\033[90m⟳ Refreshing every {args.interval}s · Press Ctrl+C to stop\033[0m", flush=True)
@@ -761,6 +1017,9 @@ def main(argv: List[str] | None = None) -> int:
         except KyoceraError as exc:
             logging.error("%s", exc)
             return 1
+
+        # Log data to CSV if at 10-minute interval
+        logger.log(data)
 
         if args.json:
             json.dump(data, sys.stdout, indent=2)
