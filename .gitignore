@@ -1,6 +1,9 @@
 # Configuration file with credentials
 kyocera.conf
 
+# Log files
+*.log
+
 # Python cache
 __pycache__/
 *.py[cod]

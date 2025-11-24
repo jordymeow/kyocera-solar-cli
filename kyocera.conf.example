@@ -15,3 +15,8 @@ location = Japan
 capacity_kwh = 16.5
 # Minimum reserve percentage - battery won't discharge below this (default: 30)
 reserve_percent = 30
+
+[logging]
+# Optional: Directory where CSV log files will be stored (default: current directory)
+# The log file will be named {site_id}.log and contain data recorded at 10-minute intervals
+# log_dir = /path/to/logs
